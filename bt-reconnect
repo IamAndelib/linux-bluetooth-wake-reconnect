@@ -1,0 +1,83 @@
+#!/bin/sh
+# Reconnect the Bluetooth devices that were connected before sleep.
+#
+# On wake, some USB adapters get reset and re-created. Bluedevil tries to
+# restore connections while the adapter is gone, finds no devices and gives up.
+# This runs when the adapter returns, using the list bluedevil saved before
+# sleep. See README.md.
+
+config="$HOME/.config/bluedevilglobalrc"
+suspend_count="${BT_RECONNECT_SUSPEND_COUNT:-/sys/power/suspend_stats/success}"
+
+if [ ! -r "$config" ]; then
+    echo "no bluedevil settings at $config, nothing to do"
+    exit 0
+fi
+
+# With bluedevil's Enable or Disable login setting, the saved list is only
+# meant for wakes. Skip this run if the machine hasn't slept since it booted.
+launch_state=$(sed -n 's/^launchState=//p' "$config" | tr '[:upper:]' '[:lower:]')
+case "$launch_state" in
+    ""|remember) ;;
+    *)
+        if [ "$(cat "$suspend_count" 2>/dev/null || echo 0)" = 0 ]; then
+            echo "login setting is $launch_state and there's been no sleep yet, skipping"
+            exit 0
+        fi
+        ;;
+esac
+
+# Keep only real addresses: this file's contents become command arguments.
+devices=$(sed -n 's/^connectedDevices=//p' "$config" | tr ',' '\n' |
+    grep -E '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$')
+if [ -z "$devices" ]; then
+    echo "no devices were connected before sleep, nothing to do"
+    exit 0
+fi
+
+# Every bluetoothctl call has a time limit because it can block indefinitely.
+adapter_state() {
+    timeout 3 bluetoothctl show 2>/dev/null | sed -n 's/^[[:space:]]*Powered: //p'
+}
+
+is_connected() {
+    timeout 3 bluetoothctl info "$1" 2>/dev/null | grep -q 'Connected: yes'
+}
+
+# Wait for the adapter to come back
+state=""
+for _ in $(seq 30); do
+    state=$(adapter_state)
+    [ "$state" = "yes" ] && break
+    sleep 1
+done
+
+case "$state" in
+    yes) ;;
+    no)
+        echo "Bluetooth is turned off, not reconnecting"
+        exit 0
+        ;;
+    *)
+        echo "no Bluetooth adapter appeared within 30 attempts" >&2
+        exit 1
+        ;;
+esac
+
+status=0
+for d in $devices; do
+    for _ in 1 2 3 4 5; do
+        # Checked first: connect fails with br-connection-busy if already up
+        is_connected "$d" && break
+        timeout 20 bluetoothctl connect "$d"
+        is_connected "$d" && break
+        sleep 3
+    done
+    if is_connected "$d"; then
+        echo "$d connected"
+    else
+        echo "$d could not be reconnected" >&2
+        status=1
+    fi
+done
+exit $status

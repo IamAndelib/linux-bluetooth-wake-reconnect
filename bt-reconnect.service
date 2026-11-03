@@ -1,0 +1,11 @@
+[Unit]
+Description=Reconnect Bluetooth devices when the adapter returns
+Documentation=https://github.com/IamAndelib/linux-bluetooth-wake-reconnect
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/bt-reconnect
+TimeoutStartSec=300
+
+[Install]
+WantedBy=bluetooth.target
